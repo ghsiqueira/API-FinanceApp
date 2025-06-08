@@ -1,0 +1,41 @@
+{
+  "name": "api-financeapp",
+  "version": "1.0.0",
+  "description": "Backend para aplicativo de gestão financeira",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node scripts/quick-jwt-gen.js && nodemon server.js",
+    "dev:no-jwt": "nodemon server.js",
+    "test:api": "node scripts/test-api.js",
+    "test:curl": "bash scripts/test-curl.sh",
+    "test:health": "curl -s http://localhost:3000/api/health | json_pp || echo 'Servidor não está rodando'",
+    "jwt:generate": "node scripts/generate-and-apply-jwt.js",
+    "jwt:auto": "node scripts/generate-and-apply-jwt.js --auto",
+    "jwt:test": "node scripts/test-jwt-rotation.js",
+    "jwt:status": "curl -s http://localhost:3000/api/jwt-status | json_pp || echo 'Servidor não está rodando'",
+    "jwt:rotate": "curl -s -X POST http://localhost:3000/api/jwt-rotate | json_pp || echo 'Servidor não está rodando'"
+  },
+  "keywords": [
+    "finance",
+    "api",
+    "nodejs",
+    "mongodb"
+  ],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "dependencies": {
+    "bcryptjs": "^3.0.2",
+    "cors": "^2.8.5",
+    "crypto": "^1.0.1",
+    "dotenv": "^16.5.0",
+    "express": "^5.1.0",
+    "express-rate-limit": "^7.5.0",
+    "express-validator": "^7.2.1",
+    "helmet": "^8.1.0",
+    "jsonwebtoken": "^9.0.2",
+    "mongoose": "^8.15.1",
+    "nodemailer": "^7.0.3"
+  }
+}
