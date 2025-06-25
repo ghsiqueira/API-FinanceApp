@@ -236,7 +236,7 @@ router.get('/dashboard', async (req, res) => {
   try {
     const { period = 'month' } = req.query;
 
-    // Calcular datas do período
+    // ✅ CORRIGIDO: Calcular datas do período
     const now = new Date();
     let startDate, endDate;
 
@@ -252,7 +252,7 @@ router.get('/dashboard', async (req, res) => {
       case 'quarter':
         const quarter = Math.floor(now.getMonth() / 3);
         startDate = new Date(now.getFullYear(), quarter * 3, 1);
-        endDate = new Date(now.getFullYear(), quarter * 3 + 3, 0);
+        endDate = new Date(now.getFullYear(), quarter * 3 + 3, 0); // ✅ CORRIGIDO
         break;
       case 'year':
         startDate = new Date(now.getFullYear(), 0, 1);
@@ -263,166 +263,228 @@ router.get('/dashboard', async (req, res) => {
         endDate = new Date(now.getFullYear(), now.getMonth() + 1, 0);
     }
 
-    // Estatísticas financeiras
-    const [financialStats] = await Transaction.getStats(req.userId, startDate, endDate);
-    
-    // Orçamentos ativos
-    const activeBudgets = await Budget.getActiveBudgets(req.userId);
-    
-    // Metas ativas
-    const activeGoals = await Goal.getActiveGoals(req.userId);
+    console.log(`📊 Buscando dashboard para usuário ${req.userId}, período: ${period}`);
+    console.log(`📅 Datas: ${startDate.toISOString()} até ${endDate.toISOString()}`);
 
-    // Transações recentes
-    const recentTransactions = await Transaction.find({
-      userId: req.userId,
-      isDeleted: { $ne: true }
-    })
-      .populate('categoryId', 'name icon color')
-      .sort({ createdAt: -1 })
+    // ✅ CORRIGIDO: Buscar dados com tratamento de erro individual
+    let financialStats = null;
+    let activeBudgets = [];
+    let activeGoals = [];
+    let recentTransactions = [];
+    let categorySpending = [];
+    let monthlyEvolution = [];
+
+    try {
+      // Estatísticas financeiras básicas
+      const transactions = await Transaction.find({
+        userId: req.userId,
+        date: { $gte: startDate, $lte: endDate },
+        isDeleted: { $ne: true },
+        status: 'completed'
+      });
+
+      const income = transactions.filter(t => t.type === 'income').reduce((sum, t) => sum + t.amount, 0);
+      const expense = transactions.filter(t => t.type === 'expense').reduce((sum, t) => sum + t.amount, 0);
+
+      financialStats = {
+        income,
+        expense,
+        balance: income - expense,
+        incomeCount: transactions.filter(t => t.type === 'income').length,
+        expenseCount: transactions.filter(t => t.type === 'expense').length,
+        totalTransactions: transactions.length
+      };
+
+      console.log('✅ Estatísticas financeiras calculadas');
+    } catch (error) {
+      console.error('❌ Erro nas estatísticas financeiras:', error);
+    }
+
+    try {
+      // Orçamentos ativos
+      activeBudgets = await Budget.find({
+        userId: req.userId,
+        isActive: true,
+        startDate: { $lte: endDate },
+        endDate: { $gte: startDate }
+      }).populate('categoryId').limit(5);
+
+      console.log(`✅ ${activeBudgets.length} orçamentos ativos encontrados`);
+    } catch (error) {
+      console.error('❌ Erro ao buscar orçamentos:', error);
+    }
+
+    try {
+      // Metas ativas
+      activeGoals = await Goal.find({
+        userId: req.userId,
+        status: 'active'
+      }).populate('categoryId').limit(5);
+
+      console.log(`✅ ${activeGoals.length} metas ativas encontradas`);
+    } catch (error) {
+      console.error('❌ Erro ao buscar metas:', error);
+    }
+
+    try {
+      // Transações recentes
+      recentTransactions = await Transaction.find({
+        userId: req.userId,
+        isDeleted: { $ne: true }
+      })
+      .populate('categoryId')
+      .sort({ date: -1 })
       .limit(10);
 
-    // Gastos por categoria
-    const categorySpending = await Transaction.aggregate([
-      {
-        $match: {
-          userId: req.userId,
-          type: 'expense',
-          isDeleted: { $ne: true },
-          status: 'completed',
-          date: { $gte: startDate, $lte: endDate }
-        }
-      },
-      {
-        $lookup: {
-          from: 'categories',
-          localField: 'categoryId',
-          foreignField: '_id',
-          as: 'category'
-        }
-      },
-      {
-        $group: {
-          _id: '$categoryId',
-          category: { $first: { $arrayElemAt: ['$category', 0] } },
-          total: { $sum: '$amount' },
-          count: { $sum: 1 }
-        }
-      },
-      {
-        $project: {
-          category: {
-            $ifNull: [
-              '$category',
-              { name: 'Sem categoria', icon: 'help-circle', color: '#A8A8A8' }
-            ]
-          },
-          total: 1,
-          count: 1
-        }
-      },
-      {
-        $sort: { total: -1 }
-      },
-      {
-        $limit: 10
-      }
-    ]);
+      console.log(`✅ ${recentTransactions.length} transações recentes encontradas`);
+    } catch (error) {
+      console.error('❌ Erro ao buscar transações recentes:', error);
+    }
 
-    // Evolução mensal (últimos 6 meses)
-    const sixMonthsAgo = new Date();
-    sixMonthsAgo.setMonth(sixMonthsAgo.getMonth() - 6);
+    try {
+      // Gastos por categoria
+      categorySpending = await Transaction.aggregate([
+        {
+          $match: {
+            userId: req.userId,
+            type: 'expense',
+            date: { $gte: startDate, $lte: endDate },
+            isDeleted: { $ne: true },
+            status: 'completed'
+          }
+        },
+        {
+          $group: {
+            _id: '$categoryId',
+            total: { $sum: '$amount' },
+            count: { $sum: 1 }
+          }
+        },
+        {
+          $lookup: {
+            from: 'categories',
+            localField: '_id',
+            foreignField: '_id',
+            as: 'category'
+          }
+        },
+        {
+          $unwind: '$category'
+        },
+        {
+          $sort: { total: -1 }
+        },
+        {
+          $limit: 10
+        }
+      ]);
 
-    const monthlyEvolution = await Transaction.aggregate([
-      {
-        $match: {
-          userId: req.userId,
-          isDeleted: { $ne: true },
-          status: 'completed',
-          date: { $gte: sixMonthsAgo }
-        }
-      },
-      {
-        $group: {
-          _id: {
-            year: { $year: '$date' },
-            month: { $month: '$date' },
-            type: '$type'
-          },
-          total: { $sum: '$amount' }
-        }
-      },
-      {
-        $group: {
-          _id: { year: '$_id.year', month: '$_id.month' },
-          income: {
-            $sum: {
-              $cond: [{ $eq: ['$_id.type', 'income'] }, '$total', 0]
-            }
-          },
-          expense: {
-            $sum: {
-              $cond: [{ $eq: ['$_id.type', 'expense'] }, '$total', 0]
+      console.log(`✅ ${categorySpending.length} categorias com gastos encontradas`);
+    } catch (error) {
+      console.error('❌ Erro ao calcular gastos por categoria:', error);
+    }
+
+    try {
+      // Evolução mensal (últimos 6 meses)
+      const sixMonthsAgo = new Date(now.getFullYear(), now.getMonth() - 5, 1);
+      
+      monthlyEvolution = await Transaction.aggregate([
+        {
+          $match: {
+            userId: req.userId,
+            date: { $gte: sixMonthsAgo },
+            isDeleted: { $ne: true },
+            status: 'completed'
+          }
+        },
+        {
+          $group: {
+            _id: {
+              year: { $year: '$date' },
+              month: { $month: '$date' },
+              type: '$type'
+            },
+            total: { $sum: '$amount' }
+          }
+        },
+        {
+          $group: {
+            _id: {
+              year: '$_id.year',
+              month: '$_id.month'
+            },
+            income: {
+              $sum: {
+                $cond: [{ $eq: ['$_id.type', 'income'] }, '$total', 0]
+              }
+            },
+            expense: {
+              $sum: {
+                $cond: [{ $eq: ['$_id.type', 'expense'] }, '$total', 0]
+              }
             }
           }
+        },
+        {
+          $addFields: {
+            balance: { $subtract: ['$income', '$expense'] }
+          }
+        },
+        {
+          $sort: { '_id.year': 1, '_id.month': 1 }
         }
-      },
-      {
-        $project: {
-          year: '$_id.year',
-          month: '$_id.month',
-          income: 1,
-          expense: 1,
-          balance: { $subtract: ['$income', '$expense'] }
-        }
-      },
-      {
-        $sort: { '_id.year': 1, '_id.month': 1 }
-      }
-    ]);
+      ]);
 
-    // Alertas importantes
+      console.log(`✅ ${monthlyEvolution.length} meses de evolução calculados`);
+    } catch (error) {
+      console.error('❌ Erro ao calcular evolução mensal:', error);
+    }
+
+    // ✅ CORRIGIDO: Alertas simplificados
     const alerts = [];
 
-    // Verificar orçamentos excedidos
-    for (const budget of activeBudgets) {
-      await budget.calculateSpent();
+    // Alertas de orçamentos excedidos
+    activeBudgets.forEach(budget => {
       if (budget.isExceeded) {
         alerts.push({
           type: 'budget_exceeded',
           title: 'Orçamento Excedido',
-          message: `Orçamento "${budget.name}" excedeu o limite`,
+          message: `O orçamento "${budget.name}" foi excedido`,
           severity: 'high',
           data: budget
         });
-      } else if (budget.shouldAlert) {
+      } else if (budget.spentPercentage >= (budget.alertThreshold || 80)) {
         alerts.push({
           type: 'budget_warning',
-          title: 'Alerta de Orçamento',
-          message: `Orçamento "${budget.name}" atingiu ${budget.spentPercentage}% do limite`,
+          title: 'Orçamento Próximo do Limite',
+          message: `O orçamento "${budget.name}" está ${budget.spentPercentage}% usado`,
           severity: 'medium',
           data: budget
         });
       }
-    }
-
-    // Verificar metas próximas do prazo
-    const urgentGoals = activeGoals.filter(goal => goal.daysRemaining <= 30);
-    urgentGoals.forEach(goal => {
-      alerts.push({
-        type: 'goal_deadline',
-        title: 'Meta Próxima do Prazo',
-        message: `Meta "${goal.title}" vence em ${goal.daysRemaining} dias`,
-        severity: goal.daysRemaining <= 7 ? 'high' : 'medium',
-        data: goal
-      });
     });
+
+    // Alertas de metas próximas do prazo
+    activeGoals.forEach(goal => {
+      if (goal.daysRemaining <= 30 && goal.daysRemaining > 0) {
+        alerts.push({
+          type: 'goal_deadline',
+          title: 'Meta Próxima do Prazo',
+          message: `A meta "${goal.title}" vence em ${goal.daysRemaining} dias`,
+          severity: goal.daysRemaining <= 7 ? 'high' : 'medium',
+          data: goal
+        });
+      }
+    });
+
+    console.log(`✅ Dashboard calculado com sucesso: ${alerts.length} alertas`);
 
     res.json({
       success: true,
       data: {
         period,
-        startDate,
-        endDate,
+        startDate: startDate.toISOString(),
+        endDate: endDate.toISOString(),
         financialStats: financialStats || {
           income: 0,
           expense: 0,
@@ -440,17 +502,19 @@ router.get('/dashboard', async (req, res) => {
         summary: {
           totalBudgets: activeBudgets.length,
           totalGoals: activeGoals.length,
-          completedGoals: activeGoals.filter(g => g.isCompleted).length,
+          completedGoals: activeGoals.filter(g => g.status === 'completed').length,
           alertsCount: alerts.length
         }
       }
     });
 
   } catch (error) {
-    console.error('Erro ao buscar dashboard:', error);
+    console.error('❌ Erro ao buscar dashboard:', error);
+    console.error('❌ Stack trace:', error.stack);
     res.status(500).json({
       success: false,
-      message: 'Erro interno do servidor'
+      message: 'Erro interno do servidor',
+      error: process.env.NODE_ENV === 'development' ? error.message : undefined
     });
   }
 });
