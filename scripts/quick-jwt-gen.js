@@ -1,71 +1,48 @@
+// scripts/quick-jwt-gen.js - Versão Corrigida
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
 
-console.log('🔑 Gerando novo JWT secret para desenvolvimento...');
+const envPath = path.join(__dirname, '..', '.env');
 
-function generateJWTSecret() {
-  // Gerar secret de 64 bytes (128 caracteres hex)
-  return crypto.randomBytes(64).toString('hex');
+console.log('🔍 Verificando JWT secret...');
+
+// Ler arquivo .env atual
+let envContent = '';
+if (fs.existsSync(envPath)) {
+  envContent = fs.readFileSync(envPath, 'utf8');
 }
 
-function updateEnvFile() {
-  try {
-    const envPath = path.join(process.cwd(), '.env');
-    
-    // Verificar se .env existe
-    if (!fs.existsSync(envPath)) {
-      console.log('❌ Arquivo .env não encontrado!');
-      process.exit(1);
-    }
-    
-    // Ler conteúdo atual
-    let envContent = fs.readFileSync(envPath, 'utf8');
-    
-    // Gerar novo secret
-    const newSecret = generateJWTSecret();
-    
-    // Substituir JWT_SECRET existente
-    const jwtSecretRegex = /^JWT_SECRET=.*$/gm;
-    
-    if (jwtSecretRegex.test(envContent)) {
-      // Substituir linha existente
-      envContent = envContent.replace(jwtSecretRegex, `JWT_SECRET=${newSecret}`);
-      console.log('✅ JWT_SECRET atualizado no .env');
-    } else {
-      // Se não existe, adicionar na seção JWT
-      const jwtSectionRegex = /^# JWT$/gm;
-      if (jwtSectionRegex.test(envContent)) {
-        envContent = envContent.replace(
-          /^# JWT$/gm, 
-          `# JWT\nJWT_SECRET=${newSecret}`
-        );
-        console.log('✅ JWT_SECRET adicionado na seção JWT');
-      } else {
-        // Adicionar no final
-        envContent += `\n# JWT\nJWT_SECRET=${newSecret}`;
-        console.log('✅ JWT_SECRET adicionado no final do .env');
-      }
-    }
-    
-    // Escrever arquivo atualizado
-    fs.writeFileSync(envPath, envContent, 'utf8');
-    
-    console.log(`🔑 Novo secret: ${newSecret.substring(0, 16)}...`);
-    console.log(`📏 Tamanho: ${newSecret.length} caracteres`);
-    
-    return true;
-    
-  } catch (error) {
-    console.error('❌ Erro ao atualizar .env:', error.message);
-    return false;
-  }
-}
+// Verificar se já existe um JWT_SECRET válido
+const jwtSecretMatch = envContent.match(/^JWT_SECRET=(.+)$/m);
 
-// Executar geração
-if (updateEnvFile()) {
-  console.log('🚀 JWT secret gerado e aplicado com sucesso!');
+if (jwtSecretMatch && jwtSecretMatch[1] && jwtSecretMatch[1].length >= 32) {
+  console.log('✅ JWT_SECRET já existe e é válido');
+  console.log('🔑 Secret atual:', jwtSecretMatch[1].substring(0, 20) + '...');
+  console.log('📏 Tamanho:', jwtSecretMatch[1].length, 'caracteres');
+  console.log('🚀 Usando JWT secret existente!');
 } else {
-  console.log('❌ Falha ao gerar JWT secret');
-  process.exit(1);
+  console.log('🔑 Gerando novo JWT secret para desenvolvimento...');
+  
+  // Gerar novo secret apenas se não existir um válido
+  const jwtSecret = crypto.randomBytes(64).toString('hex');
+  
+  // Atualizar ou adicionar JWT_SECRET no .env
+  if (jwtSecretMatch) {
+    // Substituir secret existente
+    envContent = envContent.replace(/^JWT_SECRET=.+$/m, `JWT_SECRET=${jwtSecret}`);
+  } else {
+    // Adicionar novo secret
+    if (!envContent.includes('JWT_SECRET=')) {
+      envContent += `\nJWT_SECRET=${jwtSecret}`;
+    }
+  }
+  
+  // Salvar arquivo .env
+  fs.writeFileSync(envPath, envContent);
+  
+  console.log('✅ JWT_SECRET atualizado no .env');
+  console.log('🔑 Novo secret:', jwtSecret.substring(0, 20) + '...');
+  console.log('📏 Tamanho:', jwtSecret.length, 'caracteres');
+  console.log('🚀 JWT secret gerado e aplicado com sucesso!');
 }

@@ -1,4 +1,4 @@
-// models/Transaction.js - Versão Melhorada
+// models/Transaction.js - Versão Corrigida e Completa
 const mongoose = require('mongoose');
 
 const transactionSchema = new mongoose.Schema({
@@ -18,11 +18,11 @@ const transactionSchema = new mongoose.Schema({
     enum: ['income', 'expense'],
     required: [true, 'Tipo é obrigatório']
   },
-  // 🔥 MELHORADO: Categoria agora é opcional
+  // Categoria é opcional agora
   categoryId: {
     type: mongoose.Schema.Types.ObjectId,
     ref: 'Category',
-    default: null // Categoria é opcional
+    default: null
   },
   userId: {
     type: mongoose.Schema.Types.ObjectId,
@@ -36,7 +36,8 @@ const transactionSchema = new mongoose.Schema({
   },
   notes: {
     type: String,
-    maxlength: [500, 'Notas devem ter no máximo 500 caracteres']
+    maxlength: [500, 'Notas devem ter no máximo 500 caracteres'],
+    default: ''
   },
   tags: [{
     type: String,
@@ -44,7 +45,7 @@ const transactionSchema = new mongoose.Schema({
     maxlength: [20, 'Tag deve ter no máximo 20 caracteres']
   }],
   
-  // 🔥 NOVO: Campos para recorrência
+  // Campos para recorrência
   isRecurring: {
     type: Boolean,
     default: false
@@ -58,31 +59,11 @@ const transactionSchema = new mongoose.Schema({
     interval: {
       type: Number,
       min: 1,
-      default: 1,
-      validate: {
-        validator: function(value) {
-          // Se a transação é recorrente, interval é obrigatório
-          if (this.isRecurring && (!value || value < 1)) {
-            return false;
-          }
-          return true;
-        },
-        message: 'Intervalo deve ser maior que 0 para transações recorrentes'
-      }
+      default: 1
     },
     endDate: {
       type: Date,
-      default: null,
-      validate: {
-        validator: function(value) {
-          // Se há endDate, deve ser maior que a data da transação
-          if (value && value <= this.date) {
-            return false;
-          }
-          return true;
-        },
-        message: 'Data de fim deve ser posterior à data da transação'
-      }
+      default: null
     },
     remainingOccurrences: {
       type: Number,
@@ -95,7 +76,7 @@ const transactionSchema = new mongoose.Schema({
     }
   },
   
-  // 🔥 NOVO: Para transações filhas geradas por recorrência
+  // Para transações filhas geradas por recorrência
   parentTransactionId: {
     type: mongoose.Schema.Types.ObjectId,
     ref: 'Transaction',
@@ -117,7 +98,7 @@ const transactionSchema = new mongoose.Schema({
     default: 'completed'
   },
   
-  // 🔥 NOVO: Campos para auditoria
+  // Campos para auditoria
   attachment: {
     filename: String,
     url: String,
@@ -151,11 +132,17 @@ const transactionSchema = new mongoose.Schema({
   }
 }, {
   timestamps: true,
-  toJSON: { virtuals: true },
+  toJSON: { 
+    virtuals: true,
+    transform: function(doc, ret) {
+      delete ret.__v;
+      return ret;
+    }
+  },
   toObject: { virtuals: true }
 });
 
-// 🔥 NOVO: Índices para performance
+// Índices para performance
 transactionSchema.index({ userId: 1, date: -1 });
 transactionSchema.index({ userId: 1, type: 1, date: -1 });
 transactionSchema.index({ userId: 1, categoryId: 1, date: -1 });
@@ -163,17 +150,17 @@ transactionSchema.index({ userId: 1, isRecurring: 1, 'recurringConfig.nextOccurr
 transactionSchema.index({ parentTransactionId: 1 });
 transactionSchema.index({ isDeleted: 1, userId: 1 });
 
-// 🔥 NOVO: Virtual para próximas ocorrências
+// Virtual para próximas ocorrências
 transactionSchema.virtual('nextOccurrences').get(function() {
-  if (!this.isRecurring || !this.recurringConfig) return [];
+  if (!this.isRecurring || !this.recurringConfig || !this.recurringConfig.frequency) return [];
   
   const occurrences = [];
   let currentDate = new Date(this.date);
   const { frequency, interval, endDate, remainingOccurrences } = this.recurringConfig;
   
-  const maxOccurrences = remainingOccurrences || 10; // Limite padrão
+  const maxOccurrences = remainingOccurrences || 10;
   
-  for (let i = 0; i < Math.min(maxOccurrences, 5); i++) { // Mostrar apenas 5 próximas
+  for (let i = 0; i < Math.min(maxOccurrences, 5); i++) {
     switch (frequency) {
       case 'daily':
         currentDate.setDate(currentDate.getDate() + interval);
@@ -197,29 +184,39 @@ transactionSchema.virtual('nextOccurrences').get(function() {
   return occurrences;
 });
 
-// 🔥 NOVO: Middleware para validação de recorrência
+// Middleware para validação de recorrência
 transactionSchema.pre('save', function(next) {
-  // Validar configuração de recorrência
-  if (this.isRecurring) {
-    if (!this.recurringConfig || !this.recurringConfig.frequency) {
-      return next(new Error('Configuração de recorrência é obrigatória para transações recorrentes'));
+  try {
+    // Validar configuração de recorrência
+    if (this.isRecurring) {
+      if (!this.recurringConfig || !this.recurringConfig.frequency) {
+        return next(new Error('Configuração de recorrência é obrigatória para transações recorrentes'));
+      }
+      
+      // Calcular próxima ocorrência se não existir
+      if (!this.recurringConfig.nextOccurrence) {
+        this.calculateNextOccurrence();
+      }
+    } else {
+      // Limpar configuração se não é recorrente
+      this.recurringConfig = {
+        frequency: null,
+        interval: 1,
+        endDate: null,
+        remainingOccurrences: null,
+        nextOccurrence: null
+      };
     }
     
-    // Calcular próxima ocorrência
-    if (!this.recurringConfig.nextOccurrence) {
-      this.calculateNextOccurrence();
-    }
-  } else {
-    // Limpar configuração se não é recorrente
-    this.recurringConfig = undefined;
+    next();
+  } catch (error) {
+    next(error);
   }
-  
-  next();
 });
 
-// 🔥 NOVO: Método para calcular próxima ocorrência
+// Método para calcular próxima ocorrência
 transactionSchema.methods.calculateNextOccurrence = function() {
-  if (!this.isRecurring || !this.recurringConfig) return null;
+  if (!this.isRecurring || !this.recurringConfig || !this.recurringConfig.frequency) return null;
   
   const { frequency, interval } = this.recurringConfig;
   const nextDate = new Date(this.date);
@@ -243,9 +240,9 @@ transactionSchema.methods.calculateNextOccurrence = function() {
   return nextDate;
 };
 
-// 🔥 NOVO: Método para gerar próxima transação recorrente
+// Método para gerar próxima transação recorrente
 transactionSchema.methods.generateNextRecurrence = async function() {
-  if (!this.isRecurring || !this.recurringConfig) return null;
+  if (!this.isRecurring || !this.recurringConfig || !this.recurringConfig.frequency) return null;
   
   const { endDate, remainingOccurrences } = this.recurringConfig;
   const nextDate = this.recurringConfig.nextOccurrence;
@@ -267,7 +264,7 @@ transactionSchema.methods.generateNextRecurrence = async function() {
     paymentMethod: this.paymentMethod,
     parentTransactionId: this._id,
     isGeneratedFromRecurring: true,
-    isRecurring: false // Transações filhas não são recorrentes
+    isRecurring: false
   });
   
   await newTransaction.save();
@@ -282,54 +279,70 @@ transactionSchema.methods.generateNextRecurrence = async function() {
   return newTransaction;
 };
 
-// 🔥 NOVO: Método estático para processar recorrências pendentes
+// Método estático para processar recorrências pendentes
 transactionSchema.statics.processRecurringTransactions = async function() {
   const now = new Date();
   
-  const recurringTransactions = await this.find({
-    isRecurring: true,
-    'recurringConfig.nextOccurrence': { $lte: now },
-    isDeleted: { $ne: true }
-  });
-  
-  const results = [];
-  
-  for (const transaction of recurringTransactions) {
-    try {
-      const newTransaction = await transaction.generateNextRecurrence();
-      if (newTransaction) {
-        results.push(newTransaction);
+  try {
+    const recurringTransactions = await this.find({
+      isRecurring: true,
+      'recurringConfig.nextOccurrence': { $lte: now },
+      isDeleted: { $ne: true }
+    });
+    
+    const results = [];
+    
+    for (const transaction of recurringTransactions) {
+      try {
+        const newTransaction = await transaction.generateNextRecurrence();
+        if (newTransaction) {
+          results.push(newTransaction);
+        }
+      } catch (error) {
+        console.error(`Erro ao gerar recorrência para transação ${transaction._id}:`, error);
       }
-    } catch (error) {
-      console.error(`Erro ao gerar recorrência para transação ${transaction._id}:`, error);
     }
+    
+    return results;
+  } catch (error) {
+    console.error('Erro ao processar transações recorrentes:', error);
+    return [];
   }
-  
-  return results;
 };
 
-// 🔥 NOVO: Método para obter estatísticas de recorrência
+// Método para obter estatísticas de recorrência
 transactionSchema.statics.getRecurringStats = async function(userId) {
-  const stats = await this.aggregate([
-    { $match: { userId: new mongoose.Types.ObjectId(userId), isRecurring: true, isDeleted: { $ne: true } } },
-    {
-      $group: {
-        _id: '$recurringConfig.frequency',
-        count: { $sum: 1 },
-        totalAmount: { $sum: '$amount' }
+  try {
+    const stats = await this.aggregate([
+      { 
+        $match: { 
+          userId: new mongoose.Types.ObjectId(userId), 
+          isRecurring: true, 
+          isDeleted: { $ne: true } 
+        } 
+      },
+      {
+        $group: {
+          _id: '$recurringConfig.frequency',
+          count: { $sum: 1 },
+          totalAmount: { $sum: '$amount' }
+        }
       }
-    }
-  ]);
-  
-  return stats;
+    ]);
+    
+    return stats;
+  } catch (error) {
+    console.error('Erro ao obter estatísticas de recorrência:', error);
+    return [];
+  }
 };
 
-// 🔥 MELHORADO: Query helper para filtrar não deletadas
+// Query helper para filtrar não deletadas
 transactionSchema.query.notDeleted = function() {
   return this.where({ isDeleted: { $ne: true } });
 };
 
-// 🔥 MELHORADO: Query helper para incluir categoria
+// Query helper para incluir categoria
 transactionSchema.query.withCategory = function() {
   return this.populate('categoryId', 'name icon color type');
 };

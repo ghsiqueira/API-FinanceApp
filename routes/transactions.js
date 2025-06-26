@@ -1,4 +1,4 @@
-// routes/transactions.js - Versão Melhorada
+// routes/transactions.js - Versão Completa Corrigida
 const express = require('express');
 const { body, query, validationResult } = require('express-validator');
 const Transaction = require('../models/Transaction');
@@ -6,6 +6,12 @@ const Category = require('../models/Category');
 const { authenticate } = require('../middleware/auth');
 
 const router = express.Router();
+
+// Verificar se o middleware foi carregado corretamente
+if (!authenticate) {
+  console.error('❌ Middleware authenticate não foi carregado corretamente');
+  throw new Error('Middleware authenticate não encontrado');
+}
 
 // Aplicar autenticação em todas as rotas
 router.use(authenticate);
@@ -62,6 +68,28 @@ const transactionValidation = [
     .withMessage('Número de ocorrências deve ser positivo')
 ];
 
+// Função auxiliar para atualizar gastos do orçamento
+const updateBudgetSpent = async (categoryId, userId) => {
+  try {
+    const Budget = require('../models/Budget');
+    const now = new Date();
+    
+    const activeBudgets = await Budget.find({
+      userId,
+      categoryId,
+      isActive: true,
+      startDate: { $lte: now },
+      endDate: { $gte: now }
+    });
+
+    for (const budget of activeBudgets) {
+      await budget.updateSpentAmount();
+    }
+  } catch (error) {
+    console.error('Erro ao atualizar orçamento:', error);
+  }
+};
+
 // POST /api/transactions - Criar transação
 router.post('/', transactionValidation, async (req, res) => {
   try {
@@ -98,7 +126,7 @@ router.post('/', transactionValidation, async (req, res) => {
       if (category.type !== 'both' && category.type !== transactionData.type) {
         return res.status(400).json({
           success: false,
-          message: 'Tipo de transação incompatível com a categoria'
+          message: `Categoria "${category.name}" não aceita transações do tipo "${transactionData.type}"`
         });
       }
     }
@@ -108,35 +136,31 @@ router.post('/', transactionValidation, async (req, res) => {
       if (!transactionData.recurringConfig || !transactionData.recurringConfig.frequency) {
         return res.status(400).json({
           success: false,
-          message: 'Configuração de recorrência é obrigatória'
+          message: 'Configuração de recorrência é obrigatória para transações recorrentes'
         });
       }
 
-      // Validar data de fim se fornecida
-      if (transactionData.recurringConfig.endDate) {
-        const endDate = new Date(transactionData.recurringConfig.endDate);
-        const transactionDate = new Date(transactionData.date || Date.now());
-        
-        if (endDate <= transactionDate) {
-          return res.status(400).json({
-            success: false,
-            message: 'Data de fim deve ser posterior à data da transação'
-          });
-        }
+      // Validar data de fim ou número de ocorrências
+      if (!transactionData.recurringConfig.endDate && !transactionData.recurringConfig.remainingOccurrences) {
+        return res.status(400).json({
+          success: false,
+          message: 'Data de fim ou número de ocorrências é obrigatório para recorrência'
+        });
       }
     }
 
+    // Criar transação
     const transaction = new Transaction(transactionData);
     await transaction.save();
+
+    // Popular categoria para resposta
+    const populatedTransaction = await Transaction.findById(transaction._id)
+      .populate('categoryId', 'name icon color type');
 
     // Atualizar orçamentos se for gasto
     if (transaction.type === 'expense' && transaction.categoryId) {
       await updateBudgetSpent(transaction.categoryId, req.userId);
     }
-
-    // Buscar transação criada com dados da categoria
-    const populatedTransaction = await Transaction.findById(transaction._id)
-      .populate('categoryId', 'name icon color');
 
     res.status(201).json({
       success: true,
@@ -523,160 +547,166 @@ router.get('/stats', [
     // Filtros base
     const matchFilters = {
       userId: req.userId,
-      isDeleted: { $ne: true },
-      ...(startDate || endDate ? {
-        date: {
-          ...(startDate && { $gte: new Date(startDate) }),
-          ...(endDate && { $lte: new Date(endDate) })
-        }
-      } : {})
+      isDeleted: { $ne: true }
     };
 
-    // Agregação para estatísticas básicas
-    const stats = await Transaction.aggregate([
-      { $match: matchFilters },
-      {
-        $group: {
-          _id: '$type',
-          total: { $sum: '$amount' },
-          count: { $sum: 1 },
-          avgAmount: { $avg: '$amount' },
-          maxAmount: { $max: '$amount' },
-          minAmount: { $min: '$amount' }
-        }
-      }
-    ]);
+    if (startDate || endDate) {
+      matchFilters.date = {};
+      if (startDate) matchFilters.date.$gte = new Date(startDate);
+      if (endDate) matchFilters.date.$lte = new Date(endDate);
+    }
 
-    // Processar resultados
-    const summary = {
-      income: 0,
-      expense: 0,
-      balance: 0,
-      incomeCount: 0,
-      expenseCount: 0,
-      totalTransactions: 0,
-      averageTransaction: 0,
-      highestIncome: 0,
-      highestExpense: 0
-    };
-
-    stats.forEach(stat => {
-      if (stat._id === 'income') {
-        summary.income = stat.total;
-        summary.incomeCount = stat.count;
-        summary.highestIncome = stat.maxAmount;
-      } else if (stat._id === 'expense') {
-        summary.expense = stat.total;
-        summary.expenseCount = stat.count;
-        summary.highestExpense = stat.maxAmount;
-      }
-    });
-
-    summary.balance = summary.income - summary.expense;
-    summary.totalTransactions = summary.incomeCount + summary.expenseCount;
-    summary.averageTransaction = summary.totalTransactions > 0 
-      ? (summary.income + summary.expense) / summary.totalTransactions 
-      : 0;
-
-    // 🔥 NOVO: Evolução temporal
-    let groupStage;
+    // Configurar agrupamento por período
+    let dateGrouping;
     switch (groupBy) {
       case 'day':
-        groupStage = {
+        dateGrouping = {
           year: { $year: '$date' },
           month: { $month: '$date' },
           day: { $dayOfMonth: '$date' }
         };
         break;
       case 'week':
-        groupStage = {
+        dateGrouping = {
           year: { $year: '$date' },
           week: { $week: '$date' }
         };
         break;
       case 'year':
-        groupStage = {
+        dateGrouping = {
           year: { $year: '$date' }
         };
         break;
       default: // month
-        groupStage = {
+        dateGrouping = {
           year: { $year: '$date' },
           month: { $month: '$date' }
         };
     }
 
-    const evolution = await Transaction.aggregate([
-      { $match: matchFilters },
-      {
-        $group: {
-          _id: groupStage,
-          income: {
-            $sum: {
-              $cond: [{ $eq: ['$type', 'income'] }, '$amount', 0]
-            }
-          },
-          expense: {
-            $sum: {
-              $cond: [{ $eq: ['$type', 'expense'] }, '$amount', 0]
+    // 🔥 MELHORADO: Aggregation pipeline para estatísticas completas
+    const [stats, categoryStats, summary] = await Promise.all([
+      // Estatísticas por período
+      Transaction.aggregate([
+        { $match: matchFilters },
+        {
+          $group: {
+            _id: {
+              period: dateGrouping,
+              type: '$type'
+            },
+            total: { $sum: '$amount' },
+            count: { $sum: 1 },
+            avgAmount: { $avg: '$amount' }
+          }
+        },
+        {
+          $group: {
+            _id: '$_id.period',
+            data: {
+              $push: {
+                type: '$_id.type',
+                total: { $round: ['$total', 2] },
+                count: '$count',
+                avgAmount: { $round: ['$avgAmount', 2] }
+              }
             }
           }
+        },
+        { $sort: { '_id.year': 1, '_id.month': 1, '_id.week': 1, '_id.day': 1 } }
+      ]),
+
+      // Estatísticas por categoria
+      Transaction.aggregate([
+        { $match: matchFilters },
+        {
+          $lookup: {
+            from: 'categories',
+            localField: 'categoryId',
+            foreignField: '_id',
+            as: 'category'
+          }
+        },
+        {
+          $group: {
+            _id: {
+              categoryId: '$categoryId',
+              type: '$type'
+            },
+            category: { $first: { $arrayElemAt: ['$category', 0] } },
+            total: { $sum: '$amount' },
+            count: { $sum: 1 },
+            avgAmount: { $avg: '$amount' }
+          }
+        },
+        {
+          $project: {
+            categoryId: '$_id.categoryId',
+            type: '$_id.type',
+            category: {
+              $ifNull: [
+                '$category',
+                { name: 'Sem categoria', icon: 'help-circle', color: '#A8A8A8' }
+              ]
+            },
+            total: { $round: ['$total', 2] },
+            count: 1,
+            avgAmount: { $round: ['$avgAmount', 2] }
+          }
+        },
+        { $sort: { total: -1 } }
+      ]),
+
+      // Resumo geral
+      Transaction.aggregate([
+        { $match: matchFilters },
+        {
+          $group: {
+            _id: '$type',
+            total: { $sum: '$amount' },
+            count: { $sum: 1 },
+            avgAmount: { $avg: '$amount' }
+          }
         }
-      },
-      { $sort: { '_id.year': 1, '_id.month': 1, '_id.day': 1, '_id.week': 1 } }
+      ])
     ]);
 
-    // Estatísticas por categoria
-    const categoryStats = await Transaction.aggregate([
-      { 
-        $match: { 
-          ...matchFilters,
-          categoryId: { $ne: null }
-        }
-      },
-      {
-        $group: {
-          _id: { type: '$type', categoryId: '$categoryId' },
-          total: { $sum: '$amount' },
-          count: { $sum: 1 }
-        }
-      },
-      {
-        $lookup: {
-          from: 'categories',
-          localField: '_id.categoryId',
-          foreignField: '_id',
-          as: 'category'
-        }
-      },
-      {
-        $project: {
-          type: '$_id.type',
-          categoryId: '$_id.categoryId',
-          category: { $arrayElemAt: ['$category', 0] },
-          total: 1,
-          count: 1
-        }
-      },
-      { $sort: { total: -1 } }
-    ]);
+    // Processar resumo
+    const summaryData = {
+      income: { total: 0, count: 0, avgAmount: 0 },
+      expense: { total: 0, count: 0, avgAmount: 0 }
+    };
 
-    // Transações recentes
-    const recentTransactions = await Transaction.find({
-      userId: req.userId,
-      isDeleted: { $ne: true }
-    })
-      .populate('categoryId', 'name icon color')
-      .sort({ createdAt: -1 })
-      .limit(5);
+    summary.forEach(item => {
+      summaryData[item._id] = {
+        total: Math.round(item.total * 100) / 100,
+        count: item.count,
+        avgAmount: Math.round(item.avgAmount * 100) / 100
+      };
+    });
+
+    summaryData.balance = summaryData.income.total - summaryData.expense.total;
+
+    // Calcular percentuais para categorias
+    const totalByType = {
+      income: categoryStats.filter(s => s.type === 'income').reduce((sum, s) => sum + s.total, 0),
+      expense: categoryStats.filter(s => s.type === 'expense').reduce((sum, s) => sum + s.total, 0)
+    };
+
+    const categoryStatsWithPercentage = categoryStats.map(stat => ({
+      ...stat,
+      percentage: totalByType[stat.type] > 0 
+        ? Math.round((stat.total / totalByType[stat.type]) * 100 * 100) / 100
+        : 0
+    }));
 
     res.json({
       success: true,
       data: {
-        summary,
-        monthlyEvolution: evolution,
-        categoryStats,
-        recentTransactions
+        summary: summaryData,
+        timeline: stats,
+        categories: categoryStatsWithPercentage,
+        period: { groupBy, startDate, endDate }
       }
     });
 
@@ -689,7 +719,7 @@ router.get('/stats', [
   }
 });
 
-// 🔥 NOVO: POST /api/transactions/bulk - Criar múltiplas transações
+// POST /api/transactions/bulk - Criar múltiplas transações
 router.post('/bulk', async (req, res) => {
   try {
     const { transactions } = req.body;
@@ -704,19 +734,19 @@ router.post('/bulk', async (req, res) => {
     if (transactions.length > 100) {
       return res.status(400).json({
         success: false,
-        message: 'Máximo de 100 transações por vez'
+        message: 'Máximo 100 transações por vez'
       });
     }
 
-    // Validar cada transação
     const validTransactions = [];
     const errors = [];
 
+    // Validar cada transação
     for (let i = 0; i < transactions.length; i++) {
       const trans = transactions[i];
-      
+
       if (!trans.description || !trans.amount || !trans.type) {
-        errors.push(`Transação ${i + 1}: campos obrigatórios faltando`);
+        errors.push(`Transação ${i + 1}: campos obrigatórios ausentes`);
         continue;
       }
 

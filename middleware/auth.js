@@ -5,11 +5,20 @@ const User = require('../models/User');
 const authenticate = async (req, res, next) => {
   try {
     const token = req.header('Authorization')?.replace('Bearer ', '');
-
+    
     if (!token) {
       return res.status(401).json({
         success: false,
         message: 'Token de acesso necessário'
+      });
+    }
+
+    // Verificar se JWT_SECRET existe
+    if (!process.env.JWT_SECRET) {
+      console.error('❌ JWT_SECRET não definido no .env');
+      return res.status(500).json({
+        success: false,
+        message: 'Erro de configuração do servidor'
       });
     }
 
@@ -18,6 +27,7 @@ const authenticate = async (req, res, next) => {
     try {
       decoded = jwt.verify(token, process.env.JWT_SECRET);
     } catch (jwtError) {
+      console.error('❌ Erro ao verificar token:', jwtError.message);
       return res.status(401).json({
         success: false,
         message: 'Token inválido'
@@ -25,7 +35,6 @@ const authenticate = async (req, res, next) => {
     }
 
     const user = await User.findById(decoded.userId);
-
     if (!user || !user.isActive) {
       return res.status(401).json({
         success: false,
@@ -37,7 +46,7 @@ const authenticate = async (req, res, next) => {
     req.userId = user._id;
     next();
   } catch (error) {
-    console.error('Erro na autenticação:', error);
+    console.error('❌ Erro na autenticação:', error);
     res.status(500).json({
       success: false,
       message: 'Erro interno do servidor'
@@ -49,12 +58,11 @@ const authenticate = async (req, res, next) => {
 const optionalAuth = async (req, res, next) => {
   try {
     const token = req.header('Authorization')?.replace('Bearer ', '');
-
+    
     if (token) {
       try {
         const decoded = jwt.verify(token, process.env.JWT_SECRET);
         const user = await User.findById(decoded.userId);
-
         if (user && user.isActive) {
           req.user = user;
           req.userId = user._id;
@@ -64,7 +72,6 @@ const optionalAuth = async (req, res, next) => {
         console.log('Token opcional inválido, continuando sem autenticação');
       }
     }
-
     next();
   } catch (error) {
     // Ignora erros de token para auth opcional
@@ -86,6 +93,10 @@ const requireEmailVerification = (req, res, next) => {
 
 // Função para gerar token JWT (usa JWT_SECRET padrão)
 const generateToken = (userId) => {
+  if (!process.env.JWT_SECRET) {
+    throw new Error('JWT_SECRET não definido');
+  }
+  
   return jwt.sign(
     { userId },
     process.env.JWT_SECRET,
@@ -96,11 +107,18 @@ const generateToken = (userId) => {
 // Função para verificar token sem middleware
 const verifyToken = (token) => {
   try {
+    if (!process.env.JWT_SECRET) {
+      throw new Error('JWT_SECRET não definido');
+    }
     return jwt.verify(token, process.env.JWT_SECRET);
   } catch (error) {
+    console.error('❌ Erro ao verificar token:', error.message);
     return null;
   }
 };
+
+// Log para debug - verificar se middleware está sendo carregado
+console.log('✅ Middleware auth carregado com sucesso');
 
 module.exports = {
   authenticate,

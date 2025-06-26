@@ -583,4 +583,199 @@ router.post('/:id/renew', async (req, res) => {
   }
 });
 
+// GET /api/budgets/available-for-transaction - Buscar orçamentos ativos para transações
+router.get('/available-for-transaction', async (req, res) => {
+  try {
+    const { type = 'expense', includeSpent = 'false' } = req.query;
+    
+    // Só buscar orçamentos para gastos
+    if (type !== 'expense') {
+      return res.json({
+        success: true,
+        data: { budgets: [] }
+      });
+    }
+
+    const now = new Date();
+    
+    // Buscar orçamentos ativos no período atual
+    const budgets = await Budget.find({
+      userId: req.userId,
+      isActive: true,
+      startDate: { $lte: now },
+      endDate: { $gte: now }
+    })
+    .populate('categoryId', 'name icon color type')
+    .sort({ endDate: 1 });
+
+    // Calcular gastos se solicitado
+    const budgetsWithData = await Promise.all(
+      budgets.map(async (budget) => {
+        let budgetData = budget.toObject();
+        
+        if (includeSpent === 'true') {
+          // Calcular gasto atual
+          await budget.calculateSpent();
+          
+          const remaining = Math.max(0, budget.amount - budget.spent);
+          const percentage = budget.amount > 0 ? (budget.spent / budget.amount) * 100 : 0;
+          
+          // Determinar status
+          let status = 'safe';
+          if (percentage >= 100) status = 'exceeded';
+          else if (percentage >= 90) status = 'critical';
+          else if (percentage >= 75) status = 'warning';
+          
+          budgetData = {
+            ...budgetData,
+            spent: budget.spent,
+            remaining,
+            percentage: Math.round(percentage),
+            status
+          };
+        }
+        
+        return budgetData;
+      })
+    );
+
+    res.json({
+      success: true,
+      data: { budgets: budgetsWithData }
+    });
+
+  } catch (error) {
+    console.error('Erro ao buscar orçamentos para transação:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Erro interno do servidor'
+    });
+  }
+});
+
+// GET /api/budgets/by-category - Buscar orçamentos por categoria
+router.get('/by-category', async (req, res) => {
+  try {
+    const { categoryId, includeInactive = 'false' } = req.query;
+    
+    if (!categoryId) {
+      return res.status(400).json({
+        success: false,
+        message: 'categoryId é obrigatório'
+      });
+    }
+
+    const now = new Date();
+    const filters = {
+      userId: req.userId,
+      categoryId,
+      startDate: { $lte: now },
+      endDate: { $gte: now }
+    };
+
+    if (includeInactive !== 'true') {
+      filters.isActive = true;
+    }
+
+    const budgets = await Budget.find(filters)
+      .populate('categoryId', 'name icon color type')
+      .sort({ endDate: 1 });
+
+    // Calcular dados de cada orçamento
+    const budgetsWithData = await Promise.all(
+      budgets.map(async (budget) => {
+        await budget.calculateSpent();
+        
+        const remaining = Math.max(0, budget.amount - budget.spent);
+        const percentage = budget.amount > 0 ? (budget.spent / budget.amount) * 100 : 0;
+        
+        let status = 'safe';
+        if (percentage >= 100) status = 'exceeded';
+        else if (percentage >= 90) status = 'critical';
+        else if (percentage >= 75) status = 'warning';
+        
+        return {
+          ...budget.toObject(),
+          spent: budget.spent,
+          remaining,
+          percentage: Math.round(percentage),
+          status
+        };
+      })
+    );
+
+    res.json({
+      success: true,
+      data: { budgets: budgetsWithData }
+    });
+
+  } catch (error) {
+    console.error('Erro ao buscar orçamentos por categoria:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Erro interno do servidor'
+    });
+  }
+});
+
+// POST /api/budgets/:id/simulate-impact - Simular impacto da transação no orçamento
+router.post('/:id/simulate-impact', async (req, res) => {
+  try {
+    const { amount } = req.body;
+    
+    if (!amount || amount <= 0) {
+      return res.status(400).json({
+        success: false,
+        message: 'Valor da transação deve ser maior que zero'
+      });
+    }
+
+    const budget = await Budget.findOne({
+      _id: req.params.id,
+      userId: req.userId
+    });
+
+    if (!budget) {
+      return res.status(404).json({
+        success: false,
+        message: 'Orçamento não encontrado'
+      });
+    }
+
+    // Calcular gasto atual
+    await budget.calculateSpent();
+    
+    const currentSpent = budget.spent;
+    const newSpent = currentSpent + parseFloat(amount);
+    const remaining = Math.max(0, budget.amount - newSpent);
+    const newPercentage = budget.amount > 0 ? (newSpent / budget.amount) * 100 : 0;
+    const wouldExceed = newSpent > budget.amount;
+    
+    // Determinar novo status
+    let newStatus = 'safe';
+    if (newPercentage >= 100) newStatus = 'exceeded';
+    else if (newPercentage >= 90) newStatus = 'critical';
+    else if (newPercentage >= 75) newStatus = 'warning';
+
+    res.json({
+      success: true,
+      data: {
+        currentSpent,
+        newSpent,
+        remaining,
+        newPercentage: Math.round(newPercentage),
+        wouldExceed,
+        newStatus
+      }
+    });
+
+  } catch (error) {
+    console.error('Erro ao simular impacto:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Erro interno do servidor'
+    });
+  }
+});
+
 module.exports = router;
