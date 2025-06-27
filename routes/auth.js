@@ -1,3 +1,4 @@
+// routes/auth.js - Versão Corrigida
 const express = require('express');
 const { body, validationResult } = require('express-validator');
 const crypto = require('crypto');
@@ -12,7 +13,7 @@ const {
 
 const router = express.Router();
 
-// Validações
+// Validações melhoradas
 const registerValidation = [
   body('name')
     .trim()
@@ -24,7 +25,15 @@ const registerValidation = [
     .withMessage('Email inválido'),
   body('password')
     .isLength({ min: 6 })
-    .withMessage('Senha deve ter no mínimo 6 caracteres')
+    .withMessage('Senha deve ter no mínimo 6 caracteres'),
+  // Adicionar validação de confirmação de senha se necessário
+  body('confirmPassword').optional()
+    .custom((value, { req }) => {
+      if (value && value !== req.body.password) {
+        throw new Error('Senhas não conferem');
+      }
+      return true;
+    })
 ];
 
 const loginValidation = [
@@ -37,11 +46,19 @@ const loginValidation = [
     .withMessage('Senha é obrigatória')
 ];
 
-// POST /api/auth/register
+// POST /api/auth/register - CORRIGIDO
 router.post('/register', registerValidation, async (req, res) => {
   try {
+    console.log('📝 Dados recebidos no registro:', {
+      name: req.body.name,
+      email: req.body.email,
+      hasPassword: !!req.body.password,
+      hasConfirmPassword: !!req.body.confirmPassword
+    });
+
     const errors = validationResult(req);
     if (!errors.isEmpty()) {
+      console.log('❌ Erros de validação:', errors.array());
       return res.status(400).json({
         success: false,
         message: 'Dados inválidos',
@@ -54,11 +71,14 @@ router.post('/register', registerValidation, async (req, res) => {
     // Verificar se usuário já existe
     const existingUser = await User.findOne({ email });
     if (existingUser) {
+      console.log('❌ Email já existe:', email);
       return res.status(400).json({
         success: false,
         message: 'Email já está em uso'
       });
     }
+
+    console.log('✅ Email disponível, criando usuário...');
 
     // Criar usuário
     const user = new User({ name, email, password });
@@ -67,12 +87,25 @@ router.post('/register', registerValidation, async (req, res) => {
     const verificationToken = user.generateEmailVerificationToken();
     await user.save();
 
+    console.log('✅ Usuário salvo com ID:', user._id);
+
     // Criar categorias padrão
-    await Category.createDefaultCategories(user._id);
+    try {
+      await Category.createDefaultCategories(user._id);
+      console.log('✅ Categorias padrão criadas');
+    } catch (catError) {
+      console.log('⚠️ Erro ao criar categorias (não crítico):', catError.message);
+    }
 
-    // Enviar email de verificação
-    await sendVerificationEmail(email, name, verificationToken);
+    // Enviar email de verificação (opcional)
+    try {
+      await sendVerificationEmail(email, name, verificationToken);
+      console.log('✅ Email de verificação enviado');
+    } catch (emailError) {
+      console.log('⚠️ Erro ao enviar email (não crítico):', emailError.message);
+    }
 
+    // Resposta padronizada
     res.status(201).json({
       success: true,
       message: 'Usuário criado com sucesso! Verifique seu email para ativar a conta.',
@@ -81,25 +114,35 @@ router.post('/register', registerValidation, async (req, res) => {
           id: user._id,
           name: user.name,
           email: user.email,
-          isEmailVerified: user.isEmailVerified
+          isEmailVerified: user.isEmailVerified,
+          theme: user.theme || 'light',
+          currency: user.currency || 'BRL',
+          createdAt: user.createdAt,
+          updatedAt: user.updatedAt
         }
       }
     });
 
   } catch (error) {
-    console.error('Erro no registro:', error);
+    console.error('❌ Erro crítico no registro:', error);
     res.status(500).json({
       success: false,
-      message: 'Erro interno do servidor'
+      message: 'Erro interno do servidor',
+      ...(process.env.NODE_ENV === 'development' && { 
+        debug: error.message 
+      })
     });
   }
 });
 
-// POST /api/auth/login
+// POST /api/auth/login - CORRIGIDO
 router.post('/login', loginValidation, async (req, res) => {
   try {
+    console.log('🔐 Tentativa de login para:', req.body.email);
+
     const errors = validationResult(req);
     if (!errors.isEmpty()) {
+      console.log('❌ Erros de validação no login:', errors.array());
       return res.status(400).json({
         success: false,
         message: 'Dados inválidos',
@@ -110,21 +153,41 @@ router.post('/login', loginValidation, async (req, res) => {
     const { email, password } = req.body;
 
     // Buscar usuário com senha
-    const user = await User.findOne({ email, isActive: true }).select('+password');
-    if (!user || !(await user.comparePassword(password))) {
+    const user = await User.findOne({ 
+      email, 
+      isActive: true 
+    }).select('+password');
+
+    if (!user) {
+      console.log('❌ Usuário não encontrado:', email);
       return res.status(401).json({
         success: false,
-        message: 'Email ou senha inválidos'
+        message: 'Email ou senha incorretos'
       });
     }
+
+    // Verificar senha
+    const isPasswordValid = await user.comparePassword(password);
+    if (!isPasswordValid) {
+      console.log('❌ Senha incorreta para:', email);
+      return res.status(401).json({
+        success: false,
+        message: 'Email ou senha incorretos'
+      });
+    }
+
+    console.log('✅ Login válido, gerando token...');
+
+    // Gerar token
+    const token = generateToken(user._id);
 
     // Atualizar último login
     user.lastLogin = new Date();
     await user.save();
 
-    // Gerar token
-    const token = generateToken(user._id);
+    console.log('✅ Token gerado e usuário atualizado');
 
+    // Resposta padronizada
     res.json({
       success: true,
       message: 'Login realizado com sucesso',
@@ -135,124 +198,48 @@ router.post('/login', loginValidation, async (req, res) => {
           name: user.name,
           email: user.email,
           isEmailVerified: user.isEmailVerified,
-          theme: user.theme,
-          currency: user.currency,
-          preferences: user.preferences
+          theme: user.theme || 'light',
+          currency: user.currency || 'BRL',
+          preferences: user.preferences || {
+            language: 'pt-BR',
+            notifications: {
+              email: true,
+              budgetAlerts: true,
+              goalReminders: true
+            }
+          },
+          createdAt: user.createdAt,
+          updatedAt: user.updatedAt
         }
       }
     });
 
   } catch (error) {
-    console.error('Erro no login:', error);
+    console.error('❌ Erro crítico no login:', error);
     res.status(500).json({
       success: false,
-      message: 'Erro interno do servidor'
+      message: 'Erro interno do servidor',
+      ...(process.env.NODE_ENV === 'development' && { 
+        debug: error.message 
+      })
     });
   }
 });
 
-// POST /api/auth/verify-email
-router.post('/verify-email', async (req, res) => {
-  try {
-    const { token } = req.body;
-
-    if (!token) {
-      return res.status(400).json({
-        success: false,
-        message: 'Token é obrigatório'
-      });
+// Adicionar rota de teste de conexão
+router.get('/test-connection', (req, res) => {
+  res.json({
+    success: true,
+    message: 'Servidor funcionando',
+    timestamp: new Date().toISOString(),
+    data: {
+      status: 'online',
+      version: '1.0.0'
     }
-
-    // Hash do token
-    const hashedToken = crypto
-      .createHash('sha256')
-      .update(token)
-      .digest('hex');
-
-    // Buscar usuário com token válido
-    const user = await User.findOne({
-      emailVerificationToken: hashedToken,
-      emailVerificationExpires: { $gt: Date.now() }
-    });
-
-    if (!user) {
-      return res.status(400).json({
-        success: false,
-        message: 'Token inválido ou expirado'
-      });
-    }
-
-    // Verificar email
-    user.isEmailVerified = true;
-    user.clearTokens();
-    await user.save();
-
-    // Enviar email de boas-vindas
-    await sendWelcomeEmail(user.email, user.name);
-
-    res.json({
-      success: true,
-      message: 'Email verificado com sucesso!'
-    });
-
-  } catch (error) {
-    console.error('Erro na verificação de email:', error);
-    res.status(500).json({
-      success: false,
-      message: 'Erro interno do servidor'
-    });
-  }
+  });
 });
 
-// POST /api/auth/resend-verification
-router.post('/resend-verification', async (req, res) => {
-  try {
-    const { email } = req.body;
-
-    if (!email) {
-      return res.status(400).json({
-        success: false,
-        message: 'Email é obrigatório'
-      });
-    }
-
-    const user = await User.findOne({ email, isActive: true });
-    if (!user) {
-      return res.status(404).json({
-        success: false,
-        message: 'Usuário não encontrado'
-      });
-    }
-
-    if (user.isEmailVerified) {
-      return res.status(400).json({
-        success: false,
-        message: 'Email já foi verificado'
-      });
-    }
-
-    // Gerar novo token
-    const verificationToken = user.generateEmailVerificationToken();
-    await user.save();
-
-    // Enviar email
-    await sendVerificationEmail(user.email, user.name, verificationToken);
-
-    res.json({
-      success: true,
-      message: 'Email de verificação reenviado com sucesso'
-    });
-
-  } catch (error) {
-    console.error('Erro ao reenviar verificação:', error);
-    res.status(500).json({
-      success: false,
-      message: 'Erro interno do servidor'
-    });
-  }
-});
-
-// POST /api/auth/forgot-password
+// Resto das rotas...
 router.post('/forgot-password', async (req, res) => {
   try {
     const { email } = req.body;
@@ -266,27 +253,25 @@ router.post('/forgot-password', async (req, res) => {
 
     const user = await User.findOne({ email, isActive: true });
     if (!user) {
-      // Por segurança, sempre retorna sucesso
+      // Por segurança, não revelar se o email existe
       return res.json({
         success: true,
-        message: 'Se o email estiver cadastrado, você receberá as instruções para redefinir sua senha'
+        message: 'Se o email existir, você receberá instruções para redefinir sua senha.'
       });
     }
 
-    // Gerar token de reset
     const resetToken = user.generatePasswordResetToken();
     await user.save();
 
-    // Enviar email
-    await sendPasswordResetEmail(user.email, user.name, resetToken);
+    await sendPasswordResetEmail(email, user.name, resetToken);
 
     res.json({
       success: true,
-      message: 'Se o email estiver cadastrado, você receberá as instruções para redefinir sua senha'
+      message: 'Instruções enviadas para seu email.'
     });
 
   } catch (error) {
-    console.error('Erro no esqueci senha:', error);
+    console.error('Erro no forgot password:', error);
     res.status(500).json({
       success: false,
       message: 'Erro interno do servidor'
@@ -294,7 +279,6 @@ router.post('/forgot-password', async (req, res) => {
   }
 });
 
-// POST /api/auth/reset-password
 router.post('/reset-password', async (req, res) => {
   try {
     const { token, password } = req.body;
@@ -313,13 +297,11 @@ router.post('/reset-password', async (req, res) => {
       });
     }
 
-    // Hash do token
     const hashedToken = crypto
       .createHash('sha256')
       .update(token)
       .digest('hex');
 
-    // Buscar usuário com token válido
     const user = await User.findOne({
       passwordResetToken: hashedToken,
       passwordResetExpires: { $gt: Date.now() }
@@ -332,7 +314,6 @@ router.post('/reset-password', async (req, res) => {
       });
     }
 
-    // Atualizar senha
     user.password = password;
     user.clearTokens();
     await user.save();
@@ -351,7 +332,6 @@ router.post('/reset-password', async (req, res) => {
   }
 });
 
-// GET /api/auth/me
 router.get('/me', authenticate, async (req, res) => {
   try {
     res.json({
@@ -369,12 +349,8 @@ router.get('/me', authenticate, async (req, res) => {
   }
 });
 
-// POST /api/auth/logout
 router.post('/logout', authenticate, async (req, res) => {
   try {
-    // Em um sistema mais complexo, poderíamos invalidar o token aqui
-    // Por exemplo, mantendo uma blacklist de tokens
-    
     res.json({
       success: true,
       message: 'Logout realizado com sucesso'
