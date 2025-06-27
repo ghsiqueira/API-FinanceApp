@@ -112,6 +112,20 @@ budgetSchema.pre('save', function(next) {
   next();
 });
 
+// Certifique-se de que o virtual isExceeded está definido:
+budgetSchema.virtual('isExceeded').get(function() {
+  return this.spent > this.amount;
+});
+
+// E que os virtuals são incluídos no JSON:
+budgetSchema.set('toJSON', {
+  virtuals: true,
+  transform: function(doc, ret) {
+    delete ret.__v;
+    return ret;
+  }
+});
+
 // Método para calcular gasto atual
 budgetSchema.methods.calculateSpent = async function() {
   const Transaction = mongoose.model('Transaction');
